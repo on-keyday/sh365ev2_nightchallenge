@@ -102,6 +102,10 @@ func (a *Game) sayNeighbor(i int, say string) error {
 		}
 		var ack Ack
 		err[erri] = websocket.JSON.Receive(a.agents[i].c, &ack)
+		if !ack.OK {
+			err[erri] = fmt.Errorf("agent%d failed to say %v", i, say)
+			return
+		}
 		log.Printf("agent%d: %v said %s", i, a.agents[i].c.Request().RemoteAddr, say)
 	}
 	go doSay(left, 0)
@@ -123,14 +127,16 @@ func (h *Hub) playGame(a *Game) {
 		end := time.Now()
 		log.Println("play time: ", end.Sub(start))
 	}()
+	log.Println("play start!")
 	for j := 0; j < h.phaseLimit; j++ {
 		log.Printf("phase %d", j)
-		next_i, err := a.doSelect(i, "Sec")
+		var err error
+		i, err = a.doSelect(i, "Sec")
 		if err != nil {
 			log.Println(err)
 			return
 		}
-		i, err = a.doSelect(next_i, "Hack")
+		i, err = a.doSelect(i, "Hack")
 		if err != nil {
 			log.Println(err)
 			return
