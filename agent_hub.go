@@ -28,15 +28,6 @@ type Game struct {
 	agents []*Agent
 }
 
-type Hello struct {
-	Count int
-}
-
-type Ready struct {
-	Count    int
-	Selected bool
-}
-
 type Candidate struct {
 	Member int
 	You    int
