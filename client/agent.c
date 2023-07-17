@@ -34,11 +34,12 @@ typedef struct {
 SliceMut copy(const Slice* s){
     assert(s);
     SliceMut m;
-    m.data = alloc_or_error(s->len);
+    m.data = alloc_or_error(s->len+1);
     m.len=s->len;
     for(size_t i=0;i<s->len;i++){
         m.data[i]=s->data[i];
     }
+    m.data[s->len]=0; // for printf
     return m;
 }
 
@@ -154,8 +155,24 @@ size_t Inbuf_remain(Inbuf* b){
     return b->len-b->offset;
 }
 
-#define Inbuf_at(b,i) (b)->data[(b)->offset+i]
+#define Inbuf_at_ptr(b,i) ((b)->data+((b)->offset+i))
+#define Inbuf_at(b,i) *Inbuf_at_ptr(b,i)
 #define Inbuf_progress(b,i) ((b)->offset+=(i))
+
+B Inbuf_expect(Inbuf*b,const char* s){
+    size_t s=strlen(s);
+    if(Inbuf_remain(b)<s){
+        return 0;
+    }
+    for(size_t i=0;i<s;i++){
+        if(Inbuf_at(b,i)!=s[i]){
+            return 0;
+        }
+    }
+    return 1;
+}
+
+
 
 void read_3byte(Inbuf* b,uint32_t* buf,uint32_t* read){
     int l=b->len<3?b->len:3;
@@ -379,13 +396,64 @@ typedef struct {
     HeaderFields fields;
 }Response;
 
-void parse_http_field(Inbuf* buf,HeaderFields* f) {
+int expect_eol(Inbuf* buf){
+    return Inbuf_expect(buf,"\r\n")?2:0;
+}
+
+int parse_http_fields(Inbuf* buf,HeaderFields* f) {
     assert(f);
-    size_t i=0;
     for(;;){
+        int eol=expect_eol(buf);
+        if(eol){
+            Inbuf_progress(buf,eol);
+            return 1;
+        }
+        size_t i=0;
         Slice key,value;
-        while(!Inbuf_eof())
+        while(1){
+            if(Inbuf_eof_at(buf,i)){
+                return 0;
+            }
+            if(expect_eol(buf)){
+                return -1;
+            }
+            if(Inbuf_at(buf,i)==':'){
+                key.data=Inbuf_at_ptr(buf,0);
+                key.len= i;
+                break;
+            }
+            i++;
+        }
+        while(1){
+            if(Inbuf_eof_at(buf,i)){
+                return 0;
+            }
+            if(Inbuf_at(buf,i)!=' '){
+                break;
+            }
+            i++;
+        }
+        int v_start=i;
+        while(1){
+            if(Inbuf_eof_at(buf,i)){
+                return 0;
+            }
+            eol=expect_eol(buf);
+            if(eol){
+                value.data=Inbuf_at_ptr(buf,v_start);
+                value.len=i-v_start;
+                i+=eol;
+                break;
+            }
+            i++;
+        }
+        HeaderFields_add(f,&key,&value);
+        Inbuf_progress(buf,i);
     }
+}
+
+int read_http_response(Inbuf* buf,Response* resp){
+    
 }
 
 int write_http_request(){
