@@ -56,7 +56,7 @@ func main() {
 				if i == cand.You {
 					continue
 				}
-				websocket.JSON.Send(conn, &Select{Index: i})
+				websocket.JSON.Send(conn, &Select{Index: i, Say: phrase[cand.State]})
 				break
 			}
 		}

@@ -114,6 +114,9 @@ func (a *Game) sayNeighbor(i int, state State, say string) error {
 		}
 		var ack Ack
 		err[erri] = websocket.JSON.Receive(a.agents[i].c, &ack)
+		if err[erri] != nil {
+			return
+		}
 		if ack.Say != say {
 			err[erri] = fmt.Errorf("agent%d should say %s but said %s", i, say, ack.Say)
 			return
