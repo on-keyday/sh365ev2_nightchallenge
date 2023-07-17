@@ -8,17 +8,24 @@ import (
 )
 
 type Candidate struct {
-	Member *int
-	You    *int
-	Say    string
+	State  int
+	Member int
+	You    int
 }
 
 type Ack struct {
-	OK bool
+	Say string
 }
 
 type Select struct {
 	Index int
+	Say   string
+}
+
+var phrase = []string{
+	"Sec",
+	"Hack",
+	"365",
 }
 
 func main() {
@@ -34,10 +41,10 @@ func main() {
 			log.Println(err)
 			return
 		}
-		log.Println(cand.Say)
-		if cand.Member == nil {
+		log.Println(phrase[cand.State])
+		if cand.State == 2 {
 			log.Println("ack")
-			err = websocket.JSON.Send(conn, &Ack{OK: true})
+			err = websocket.JSON.Send(conn, &Ack{Say: phrase[cand.State]})
 			if err != nil {
 				log.Println(err)
 				return
@@ -45,8 +52,8 @@ func main() {
 		} else {
 			log.Println("select")
 			for {
-				i := rand.Intn(*cand.Member)
-				if i == *cand.You {
+				i := rand.Intn(cand.Member)
+				if i == cand.You {
 					continue
 				}
 				websocket.JSON.Send(conn, &Select{Index: i})

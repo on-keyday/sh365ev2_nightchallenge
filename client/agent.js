@@ -3,11 +3,13 @@
 
 const s=new WebSocket("ws://"+location.host+"/senda")
 
+const phrase=["Sec","Hack","365"]
+
 s.addEventListener("message",(msg)=>{
     const parsed = JSON.parse(msg.data)
-    console.log(parsed.Say);
+    console.log(phrase[parsed.State]);
     if(parsed.Member===undefined) {
-        s.send(JSON.stringify({"OK":true}))
+        s.send(JSON.stringify({"Say":phrase[parsed.State]}))
     }
     else{
         for(;;) {
@@ -15,7 +17,7 @@ s.addEventListener("message",(msg)=>{
             if(index==parsed.You){
                 continue;
             }
-            s.send(JSON.stringify({"Index":index}))
+            s.send(JSON.stringify({"Index":index,"Say": phrase[parsed.State]}))
             break;
         }
     }
