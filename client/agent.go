@@ -8,8 +8,8 @@ import (
 )
 
 type Candidate struct {
-	Member int
-	You    int
+	Member *int
+	You    *int
 	Say    string
 }
 
@@ -29,26 +29,28 @@ func main() {
 	}
 	for {
 		var cand Candidate
-		cand.Member = -1
 		err = websocket.JSON.Receive(conn, &cand)
 		if err != nil {
 			log.Println(err)
 			return
 		}
 		log.Println(cand.Say)
-		if cand.Member == -1 {
+		if cand.Member == nil {
+			log.Println("ack")
 			err = websocket.JSON.Send(conn, &Ack{OK: true})
 			if err != nil {
 				log.Println(err)
 				return
 			}
 		} else {
+			log.Println("select")
 			for {
-				i := rand.Intn(cand.Member)
-				if i == cand.You {
+				i := rand.Intn(*cand.Member)
+				if i == *cand.You {
 					continue
 				}
 				websocket.JSON.Send(conn, &Select{Index: i})
+				break
 			}
 		}
 	}

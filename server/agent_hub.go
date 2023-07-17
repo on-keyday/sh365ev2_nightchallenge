@@ -27,23 +27,31 @@ type Hub struct {
 type Game struct {
 	agents []*Agent
 }
+type State int
+
+const (
+	StateSelect1 State = iota
+	StateSelect2
+	StateSay
+)
 
 type Candidate struct {
 	Member int
 	You    int
-	Say    string
+	State  State
 }
 
 type Say struct {
-	Say string
+	State State
 }
 
 type Ack struct {
-	OK bool
+	Say string
 }
 
 type Select struct {
 	Index int
+	Say   string
 }
 
 func (h *Hub) enqueAgent(a *Agent) {
@@ -64,16 +72,20 @@ func nearIndex(i, mod int) (int, int) {
 	}
 }
 
-func (a *Game) doSelect(i int, say string) (next_i int, err error) {
+func (a *Game) doSelect(i int, state State, say string) (next_i int, err error) {
 	log.Printf("agent%d: %v is selecting", i, a.agents[i].c.Request().RemoteAddr)
 	member := len(a.agents)
-	err = websocket.JSON.Send(a.agents[i].c, &Candidate{Member: member, You: i, Say: say})
+	err = websocket.JSON.Send(a.agents[i].c, &Candidate{Member: member, You: i, State: state})
 	if err != nil {
 		return
 	}
 	var sel Select
 	err = websocket.JSON.Receive(a.agents[i].c, &sel)
 	if err != nil {
+		return
+	}
+	if sel.Say != say {
+		err = fmt.Errorf("agent%d should say %s but said %s", i, say, sel.Say)
 		return
 	}
 	if sel.Index >= len(a.agents) {
@@ -88,7 +100,7 @@ func (a *Game) doSelect(i int, say string) (next_i int, err error) {
 	return sel.Index, nil
 }
 
-func (a *Game) sayNeighbor(i int, say string) error {
+func (a *Game) sayNeighbor(i int, state State, say string) error {
 	left, right := nearIndex(i, len(a.agents))
 	var err [2]error
 	var wg sync.WaitGroup
@@ -96,14 +108,14 @@ func (a *Game) sayNeighbor(i int, say string) error {
 	doSay := func(i, erri int) {
 		defer wg.Done()
 		log.Printf("agent%d: %v will say %s", i, a.agents[i].c.Request().RemoteAddr, say)
-		err[erri] = websocket.JSON.Send(a.agents[i].c, &Say{Say: say})
+		err[erri] = websocket.JSON.Send(a.agents[i].c, &Say{State: state})
 		if err[erri] != nil {
 			return
 		}
 		var ack Ack
 		err[erri] = websocket.JSON.Receive(a.agents[i].c, &ack)
-		if !ack.OK {
-			err[erri] = fmt.Errorf("agent%d failed to say %v", i, say)
+		if ack.Say != say {
+			err[erri] = fmt.Errorf("agent%d should say %s but said %s", i, say, ack.Say)
 			return
 		}
 		log.Printf("agent%d: %v said %s", i, a.agents[i].c.Request().RemoteAddr, say)
@@ -131,17 +143,17 @@ func (h *Hub) playGame(a *Game) {
 	for j := 0; j < h.phaseLimit; j++ {
 		log.Printf("phase %d", j)
 		var err error
-		i, err = a.doSelect(i, "Sec")
+		i, err = a.doSelect(i, StateSelect1, "Sec")
 		if err != nil {
 			log.Println(err)
 			return
 		}
-		i, err = a.doSelect(i, "Hack")
+		i, err = a.doSelect(i, StateSelect2, "Hack")
 		if err != nil {
 			log.Println(err)
 			return
 		}
-		err = a.sayNeighbor(i, "365")
+		err = a.sayNeighbor(i, StateSay, "365")
 		if err != nil {
 			log.Println(err)
 			return

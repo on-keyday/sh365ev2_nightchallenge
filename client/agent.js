@@ -1,5 +1,6 @@
 `use strict`
 
+
 const s=new WebSocket("ws://"+location.host+"/senda")
 
 s.addEventListener("message",(msg)=>{
