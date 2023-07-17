@@ -21,20 +21,49 @@ typedef struct {
     size_t offset;
 } Inbuf;
 
+typedef struct {
+    const uint8_t* data;
+    size_t len;
+}Slice;
+
+typedef struct {
+    uint8_t* data;
+    size_t len;
+}SliceMut;
+
+SliceMut copy(const Slice* s){
+    assert(s);
+    SliceMut m;
+    m.data = alloc_or_error(s->len);
+    m.len=s->len;
+    for(size_t i=0;i<s->len;i++){
+        m.data[i]=s->data[i];
+    }
+    return m;
+}
+
 void Outbuf_init(Outbuf* p){
     p->data=NULL;
     p->len=0;
     p->cap=0;
 }
 
+void abort_mem(){
+    fputs("failed to allocate",stderr);
+    exit(2);
+}
+
 void Outbuf_append(Outbuf* p,const uint8_t* buf,size_t len) {
     assert(p&&buf);
     while(p->len+len>p->cap){
-        p->data=realloc(p->data,p->len*2);
-        if(p->data==NULL){
-            fputs("failed to reallocate",stderr);
-            exit(2);
+        if(p->cap==0){
+            p->cap=(len >> 1) + 1;
         }
+        p->data=realloc(p->data,p->cap*2);
+        if(p->data==NULL){
+            abort_mem();
+        }
+        p->cap*=2;
     }
     for(size_t i=0;i<len;i++) {
         p->data[p->len+i]=buf[i];
@@ -117,6 +146,14 @@ B Inbuf_eof(Inbuf* b){
     return b->offset==b->len;
 }
 
+B Inbuf_eof_at(Inbuf* b,size_t i){
+    return b->offset+i==b->len;
+}
+
+size_t Inbuf_remain(Inbuf* b){
+    return b->len-b->offset;
+}
+
 #define Inbuf_at(b,i) (b)->data[(b)->offset+i]
 #define Inbuf_progress(b,i) ((b)->offset+=(i))
 
@@ -130,7 +167,7 @@ void read_3byte(Inbuf* b,uint32_t* buf,uint32_t* read){
     *read=l;
 }
 
-B encode(Inbuf* in, Outbuf* out,uint8_t c62, uint8_t c63 ,B no_padding) {
+B base64_encode(Inbuf* in, Outbuf* out,uint8_t c62, uint8_t c63 ,B no_padding) {
     size_t count=0;
     while (!Inbuf_eof(in)) {
         uint32_t num,red;
@@ -154,7 +191,7 @@ B encode(Inbuf* in, Outbuf* out,uint8_t c62, uint8_t c63 ,B no_padding) {
     return 1;
 }
 
-B decode(Inbuf* seq, Outbuf* out, uint8_t c62 , uint8_t c63 ,B consume_padding,B should_eof) {
+B base64_decode(Inbuf* seq, Outbuf* out, uint8_t c62 , uint8_t c63 ,B consume_padding,B should_eof) {
     B end = 0;
     while (!Inbuf_eof(seq) && !end) {
         size_t redsize = 0;
@@ -181,6 +218,175 @@ B decode(Inbuf* seq, Outbuf* out, uint8_t c62 , uint8_t c63 ,B consume_padding,B
     return 1;
 }
 
+void update_sha1(uint32_t* h, const uint8_t* bits) {
+    #define ROL(word,shift) (word << shift) | (word >> (sizeof(word) * 8 - shift));
+    uint32_t w[80] = {0};
+    uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+    for (int i = 0; i < 80; i++) {
+        if (i < 16) {
+            w[i]=0;
+            for(int j=0;j<4;j++) {
+                w[i] <<=8;
+                w[i] |= bits[(i*4)+j];
+            }
+        }
+        else {
+            w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+        }
+        uint32_t f = 0, k = 0;
+        if (i <= 19) {
+            f = (b & c) | ((~b) & d);
+            k = 0x5A827999;
+        }
+        else if (i <= 39) {
+            f = b ^ c ^ d;
+            k = 0x6ED9EBA1;
+        }
+        else if (i <= 59) {
+            f = (b & c) | (b & d) | (c & d);
+            k = 0x8F1BBCDC;
+        }
+        else {
+            f = b ^ c ^ d;
+            k = 0xCA62C1D6;
+        }
+        unsigned int tmp = rol(a, 5) + f + e + k + w[i];
+        e = d;
+        d = c;
+        c = ROL(b, 30);
+        b = a;
+        a = tmp;
+    }
+    h[0] += a;
+    h[1] += b;
+    h[2] += c;
+    h[3] += d;
+    h[4] += e;
+}
+
+
+typedef struct {
+    uint32_t hash[5];
+    size_t total;
+    uint8_t buf[64];
+    size_t i;
+}SHA1;
+
+void SHA1_init(SHA1* h){
+    h->hash[0]=0x67452301;
+    h->hash[1]=0xEFCDAB89;
+    h->hash[2]=0x98BADCFE;
+    h->hash[3]=0x10325476;
+    h->hash[4]=0xC3D2E1F0;
+    h->total=0;
+    memset(h->buf,0,64);
+    h->i=0;
+}
+
+void SHA1_update(SHA1* s,Inbuf* seq) {
+    while (!Inbuf_eof(seq)) {
+        size_t initial_i=s->i;
+        if(s->i==0){
+            memset(s->buf,0,64);
+        }
+        for(;s->i<64;s->i++){
+            if(Inbuf_eof(seq)){
+                break;
+            }
+            s->buf[s->i]=Inbuf_at(seq,0);
+            Inbuf_progress(seq,1);
+        }
+        s->total+=(s->i-initial_i)*8;
+        if(s->i!=64){
+            return; // suspend
+        }
+        update_sha1(s->hash, s->buf);
+        s->i=0;
+    }
+}
+
+
+void SHA1_finish(SHA1* s,Outbuf* out){
+#define FLUSH_TOTAL() 
+for(int i=0;i<8;i++){\
+s->buf[56+i]=(uint8_t)((s->total>>(8*(7-i)))&0xff);\
+}
+    if(s->i==0){
+        memset(s->buf,0,64);
+        s->buf[0] = 0x80;
+        FLUSH_TOTAL();
+        updatec_sha1(s->hash, s->buf);
+    }
+    else {
+        s->buf[s->i] = 0x80;
+        if (s->i < 56) {
+            FLUSH_TOTAL();
+            update_sha1(s->hash, s->buf);
+        }
+        else {
+            update_sha1(s->hash, s->buf);
+            memset(s->buf,0,64);
+            FLUSH_TOTAL();
+            update_sha1(s->hash, s->buf);
+        }
+    }
+    for (int i=0;i<5;i++ ) {
+        Outbuf_put_uint32(out,s->hash[i]);
+    }
+    return 1;
+}
+
+typedef struct {
+    SliceMut key;
+    SliceMut value;
+} Field;
+
+void* alloc_or_error(size_t size) {
+    void* ptr = malloc(size);
+    if(!ptr){
+        abort_mem();
+    }
+    return ptr;
+}
+
+void Field_init(Field* f,const Slice* key,const Slice* value){
+    assert(f&&key&&value);
+    f->key = copy(key);
+    f->value = copy(value);
+}
+
+typedef struct {
+    Field* fields;
+    size_t len;
+}HeaderFields;
+
+void HeaderFields_init(HeaderFields* f){
+    f->fields=NULL;
+    f->len=0;
+}
+
+void HeaderFields_add(HeaderFields* f,const Slice* key,const Slice* value) {
+    f->fields=realloc(f->fields,sizeof(Field)*(f->len+1));
+    if(!f->fields){
+        abort_mem();
+    }
+    Field_init(&f->fields[f->len],key,value);
+    f->len+=1;
+}
+
+typedef struct {
+    uint16_t status;
+    HeaderFields fields;
+}Response;
+
+void parse_http_field(Inbuf* buf,HeaderFields* f) {
+    assert(f);
+    size_t i=0;
+    for(;;){
+        Slice key,value;
+        while(!Inbuf_eof())
+    }
+}
 
 int write_http_request(){
 
