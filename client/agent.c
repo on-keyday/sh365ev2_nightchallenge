@@ -1,7 +1,9 @@
 #ifdef _WIN32
 #include<WinSock2.h>
+#include<WS2tcpip.h>
 #else
 #include <sys/socket.h>
+#define closesocket close
 #endif
 #include<stdint.h>
 #include<stdlib.h>
@@ -21,6 +23,15 @@ typedef struct {
     size_t offset;
 } Inbuf;
 
+Inbuf Inbuf_new(const uint8_t* p,size_t l){
+    Inbuf buf = {
+        p,
+        l,
+        0,
+    };
+    return buf;
+}
+
 typedef struct {
     const uint8_t* data;
     size_t len;
@@ -30,6 +41,25 @@ typedef struct {
     uint8_t* data;
     size_t len;
 }SliceMut;
+
+void abort_mem(){
+    fputs("failed to allocate",stderr);
+    exit(2);
+}
+
+void error(const char* err){
+    fputs(err,stderr);
+    exit(2);
+}
+
+
+void* alloc_or_error(size_t size) {
+    void* ptr = malloc(size);
+    if(!ptr){
+        abort_mem();
+    }
+    return ptr;
+}
 
 SliceMut copy(const Slice* s){
     assert(s);
@@ -49,10 +79,16 @@ void Outbuf_init(Outbuf* p){
     p->cap=0;
 }
 
-void abort_mem(){
-    fputs("failed to allocate",stderr);
-    exit(2);
+void Outbuf_clean(Outbuf*p){
+    free(p->data);
+    p->data=NULL;
+    p->len=0;
+    p->cap=0;
 }
+
+
+
+
 
 void Outbuf_append(Outbuf* p,const uint8_t* buf,size_t len) {
     assert(p&&buf);
@@ -72,8 +108,12 @@ void Outbuf_append(Outbuf* p,const uint8_t* buf,size_t len) {
     p->len+=len;
 }
 
-char* bswap(char* buf,size_t len) {
-    assert(len&0x1 == 0);
+void Outbuf_append_str(Outbuf* p,const char* s) {
+    Outbuf_append(p,(const uint8_t*)s,strlen(s));
+}
+
+uint8_t* bswap(uint8_t* buf,size_t len) {
+    assert((len&0x1) == 0);
     for(size_t i=0;i<(len>>1);i++) {
         char tmp=buf[i];
         buf[i]=buf[len-1-i];
@@ -84,14 +124,14 @@ char* bswap(char* buf,size_t len) {
 
 int is_little(){
     int v=1;
-    return (const char*)(&v)[0];
+    return ((const char*)(&v))[0];
 }
 
-#define NETORD(val) is_little()?bswap((char*)&val,sizeof(val)):((char*)&val)  
+#define NETORD(val) (is_little()?bswap((uint8_t*)&val,sizeof(val)):((uint8_t*)&val))  
 
 #define DEFINE_INT_PUT(type) \
 void Outbuf_put_##type(Outbuf* b,type##_t val) {\
-    Outpub_append(b,NETORD(val),sizeof(val));\
+    Outbuf_append(b,NETORD(val),sizeof(val));\
 }
 
 void Outbuf_put_uint8(Outbuf* b,uint8_t val){
@@ -160,11 +200,11 @@ size_t Inbuf_remain(Inbuf* b){
 #define Inbuf_progress(b,i) ((b)->offset+=(i))
 
 B Inbuf_expect(Inbuf*b,const char* s){
-    size_t s=strlen(s);
-    if(Inbuf_remain(b)<s){
+    size_t l=strlen(s);
+    if(Inbuf_remain(b)<l){
         return 0;
     }
-    for(size_t i=0;i<s;i++){
+    for(size_t i=0;i<l;i++){
         if(Inbuf_at(b,i)!=s[i]){
             return 0;
         }
@@ -223,7 +263,7 @@ B base64_decode(Inbuf* seq, Outbuf* out, uint8_t c62 , uint8_t c63 ,B consume_pa
             redsize++;
             Inbuf_progress(seq,1);
         }
-        char* buf=NETORD(rep);
+        uint8_t* buf=NETORD(rep);
         Outbuf_append(out,buf+1,redsize-1);
     }
     while (consume_padding &&!Inbuf_eof(seq) && Inbuf_at(seq,0)  == '=') {
@@ -236,7 +276,7 @@ B base64_decode(Inbuf* seq, Outbuf* out, uint8_t c62 , uint8_t c63 ,B consume_pa
 }
 
 void update_sha1(uint32_t* h, const uint8_t* bits) {
-    #define ROL(word,shift) (word << shift) | (word >> (sizeof(word) * 8 - shift));
+    #define ROL(word,shift) (word << shift) | (word >> (sizeof(word) * 8 - shift))
     uint32_t w[80] = {0};
     uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
     for (int i = 0; i < 80; i++) {
@@ -248,7 +288,7 @@ void update_sha1(uint32_t* h, const uint8_t* bits) {
             }
         }
         else {
-            w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+            w[i] = ROL(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
         }
         uint32_t f = 0, k = 0;
         if (i <= 19) {
@@ -267,7 +307,7 @@ void update_sha1(uint32_t* h, const uint8_t* bits) {
             f = b ^ c ^ d;
             k = 0xCA62C1D6;
         }
-        unsigned int tmp = rol(a, 5) + f + e + k + w[i];
+        unsigned int tmp = ROL(a, 5) + f + e + k + w[i];
         e = d;
         d = c;
         c = ROL(b, 30);
@@ -332,7 +372,7 @@ s->buf[56+i]=(uint8_t)((s->total>>(8*(7-i)))&0xff);\
         memset(s->buf,0,64);
         s->buf[0] = 0x80;
         FLUSH_TOTAL();
-        updatec_sha1(s->hash, s->buf);
+        update_sha1(s->hash, s->buf);
     }
     else {
         s->buf[s->i] = 0x80;
@@ -350,7 +390,6 @@ s->buf[56+i]=(uint8_t)((s->total>>(8*(7-i)))&0xff);\
     for (int i=0;i<5;i++ ) {
         Outbuf_put_uint32(out,s->hash[i]);
     }
-    return 1;
 }
 
 typedef struct {
@@ -358,13 +397,6 @@ typedef struct {
     SliceMut value;
 } Field;
 
-void* alloc_or_error(size_t size) {
-    void* ptr = malloc(size);
-    if(!ptr){
-        abort_mem();
-    }
-    return ptr;
-}
 
 void Field_init(Field* f,const Slice* key,const Slice* value){
     assert(f&&key&&value);
@@ -456,6 +488,71 @@ int read_http_response(Inbuf* buf,Response* resp){
     
 }
 
-int write_http_request(){
+void gen_seckey(Outbuf* hdr,Outbuf* hash) {
+    SHA1 s;
+    const uint8_t* magic=(const uint8_t*)"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    const uint8_t* psdrand= (const uint8_t*)"abcdefghijklmnop";
+    Inbuf buf = Inbuf_new(psdrand, 16);
+    Outbuf tmp;
+    Outbuf_init(&tmp);
+    if(!base64_encode(&buf,&tmp,'+','/',0)){
+        error("base64");
+    }
+    Outbuf_append_str(hdr,"Sec-WebSocket-Key: ");
+    Outbuf_append(hdr,tmp.data,tmp.len);
+    Outbuf_append_str(hdr,"\r\n");
+    SHA1_init(&s);
+    buf = Inbuf_new(psdrand,strlen((const char*)psdrand));
+    SHA1_update(&s,&buf);
+    buf = Inbuf_new(magic,strlen((const char*)magic));
+    SHA1_update(&s,&buf);
+    SHA1_finish(&s,&tmp);
+    buf=Inbuf_new(tmp.data,tmp.len);
+    if(!base64_encode(&buf,hash,'+','/',0)){
+        error("base64");
+    }
+    Outbuf_clean(&tmp);
+}
 
+void write_websocket_handshake_request(SOCKET fd,Outbuf* hash){
+    Outbuf buf;
+    Outbuf_init(&buf);
+    Outbuf_append_str(&buf,"GET /senda HTTP/1.1\r\n");
+    Outbuf_append_str(&buf,"Host: localhost:8090\r\n");
+    Outbuf_append_str(&buf,"Origin: http://localhost:8090\r\n");
+    Outbuf_append_str(&buf,"Connection: Upgrade");
+    Outbuf_append_str(&buf,"Sec-Websocket-Version: 13\r\n");
+    gen_seckey(&buf,hash);
+    send(fd,(const char*)buf.data,buf.len,0);
+    Outbuf_clean(&buf);
+}
+
+
+int main() {
+    WSADATA wsa;
+    if(WSAStartup(MAKEWORD(2,2),&wsa)!=0){
+        error("wsastartup");
+    }
+    struct addrinfo addr ={0},*res=NULL;
+    addr.ai_family=AF_UNSPEC;
+    addr.ai_socktype=SOCK_STREAM;
+    if(getaddrinfo("localhost","8090",&addr,&res)!=0){
+        error("getaddrinfo");
+    }
+
+    SOCKET fd = socket(res->ai_family,res->ai_socktype,res->ai_protocol);
+
+    if(fd==-1){
+        error("socket");
+    }
+
+    if(connect(fd,res->ai_addr,res->ai_addrlen)!=0){
+        error("connect");
+    }
+    Outbuf buf;
+    Outbuf_init(&buf);
+    write_websocket_handshake_request(fd,&buf);
+
+
+    closesocket(fd);
 }
