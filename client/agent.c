@@ -9,6 +9,8 @@
 #include<stdlib.h>
 #include<assert.h>
 #include<stdio.h>
+#include<stdlib.h>
+#include<string.h>
 
 
 typedef struct {
@@ -212,6 +214,20 @@ B Inbuf_expect(Inbuf*b,const char* s){
     return 1;
 }
 
+
+B Inbuf_consume(Inbuf*b,const char* s){
+    size_t l=strlen(s);
+    if(Inbuf_remain(b)<l){
+        return 0;
+    }
+    for(size_t i=0;i<l;i++){
+        if(Inbuf_at(b,i)!=s[i]){
+            return 0;
+        }
+    }
+    b->offset+=l;
+    return 1;
+}
 
 
 void read_3byte(Inbuf* b,uint32_t* buf,uint32_t* read){
@@ -590,7 +606,7 @@ typedef struct {
 } WebSocket;
 
 void WebSocket_init(WebSocket* ws,SOCKET fd) {
-    ws->ibuf=Inbuf_new(ws->buf,2000);
+    ws->ibuf=Inbuf_new(ws->buf,0);
     ws->fd=fd;
 }
 
@@ -604,7 +620,7 @@ void WebSocket_read(WebSocket* ws,Outbuf* msg){
             WebSocket_read_socket(ws);
         }
         uint8_t flags = Inbuf_at(&ws->ibuf,0);
-        if(flags&0x80!=0){
+        if((flags&0x80)==0){
             error("not-FIN frame is not supported");
         }
         uint8_t blen=Inbuf_at(&ws->ibuf,1);
@@ -635,31 +651,40 @@ void WebSocket_read(WebSocket* ws,Outbuf* msg){
             WebSocket_read_socket(ws);
         }
         B brk=0;
-        if(flags&0x0f==1) {
+        uint8_t opcode=flags&0x0f;
+        if(opcode==1) {
             Outbuf_append(msg,Inbuf_at_ptr(&ws->ibuf,0),len);
             brk=1;
         }
-        else if(flags&0x0f== 9){
-            Outbuf tmp;
-            Outbuf_init(&tmp);
-            Outbuf_put_uint8(&tmp,flags);
-            Outbuf_put_uint8(&tmp,blen|0x80);
-            if(blen==126){
-                Outbuf_put_uint16(&tmp,(uint16_t)len);
-            }
-            else if(blen==127){
-                Outbuf_put_uint64(&tmp,len);
-            }
-            uint32_t mask_key= 0x12345678;
-            Outbuf_put_uint32(&tmp,mask_key);
-            send(ws->fd,tmp.data,tmp.len,0);
-            Outbuf_clean(&tmp);
+        else if(opcode== 9){
+            error("no handling ping");
         }
-        else if(flags&0x0f==8){
+        else if(opcode==8){
             error("connection close");
         }
         Inbuf_progress(&ws->ibuf,len);
+        if(brk){
+            break;
+        }
     }
+}
+
+void WebSocket_write(WebSocket* w,const char* s){
+    Outbuf tmp;
+    Outbuf_init(&tmp);
+    Outbuf_put_uint8(&tmp,0x80|0x01);
+    int v = strlen(s);
+    if(v>125){
+        error("too large");
+    }
+    Outbuf_put_uint8(&tmp,v|0x80);
+    uint32_t mask_key= 0x12345678;
+    Outbuf_put_uint32(&tmp,mask_key);
+    for(size_t i=0;i<v;i++){
+        Outbuf_put_uint8(&tmp,s[i] ^((mask_key>> (8*(3 -(i%4))))&0xff));
+    }
+    send(w->fd,(const char*)tmp.data,tmp.len,0);
+    Outbuf_clean(&tmp);
 }
 
 int main() {
@@ -696,6 +721,51 @@ int main() {
     for(;;) {
         Outbuf_clean(&buf);
         WebSocket_read(&ws,&buf);
+        Inbuf ibuf =Inbuf_new(buf.data,buf.len);
+
+        if(!Inbuf_consume(&ibuf,"{")){
+            error("expect {");
+        }
+        size_t state=0;
+        size_t member=0;
+        size_t you=0;
+        for(;;){
+            if(Inbuf_consume(&ibuf,"}")){
+                break;
+            }
+            if(Inbuf_consume(&ibuf," ")||Inbuf_consume(&ibuf,",")){
+                continue;
+            }
+            if(Inbuf_consume(&ibuf,"\"State\":")){
+                for(int c=Inbuf_at(&ibuf,0);!Inbuf_eof(&ibuf)&& isalnum(c)&&!isalpha(c);Inbuf_progress(&ibuf,1),c=Inbuf_at(&ibuf,1)){
+                    state *=10; 
+                    state +=(c-'0');
+                }
+            }
+            if(Inbuf_consume(&ibuf,"\"Member\":")){
+                for(int c=Inbuf_at(&ibuf,0);!Inbuf_eof(&ibuf)&& isalnum(c)&&!isalpha(c);Inbuf_progress(&ibuf,1),c=Inbuf_at(&ibuf,1)){
+                    member *=10; 
+                    member +=(c-'0');
+                }
+            }
+            if(Inbuf_consume(&ibuf,"\"You\":")){
+                for(int c=Inbuf_at(&ibuf,0);!Inbuf_eof(&ibuf)&& isalnum(c)&&!isalpha(c);Inbuf_progress(&ibuf,1),c=Inbuf_at(&ibuf,1)){
+                    you *=10; 
+                    you +=(c-'0');
+                }
+            }
+        }
+        if(state==2){
+            printf("365\n");
+            WebSocket_write(&ws,"{\"Say\": \"365\"}");
+        }
+        else if(state==0 || state==1){
+            const char* say=state==0?"Sec":"Hack";
+            printf("%s\n",say);
+            char buf[300] ={0};
+            sprintf(buf,"{\"Say\": \"%s\",\"Index\": %zu}",say,(you+1)%member);
+            WebSocket_write(&ws,buf);
+        }
     }
     closesocket(fd);
 }
