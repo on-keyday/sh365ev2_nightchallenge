@@ -531,6 +531,7 @@ void read_http_response(SOCKET fd,HeaderFields* f,Inbuf* cmp){
             }
             break;
         }
+        read_socket(fd,&ibuf,buf,2000);
     }
 }
 
@@ -582,11 +583,83 @@ void write_websocket_handshake_request(SOCKET fd,Outbuf* hash){
     Outbuf_clean(&buf);
 }
 
-
-void read_ws_frame(SOCKET fd, Outbuf* ob){
+typedef struct {
     uint8_t buf[2000];
-    Inbuf ibuf=Inbuf_new(buf,0);
-  
+    Inbuf ibuf;
+    SOCKET fd;
+} WebSocket;
+
+void WebSocket_init(WebSocket* ws,SOCKET fd) {
+    ws->ibuf=Inbuf_new(ws->buf,2000);
+    ws->fd=fd;
+}
+
+void WebSocket_read_socket(WebSocket* ws){
+    read_socket(ws->fd,&ws->ibuf,ws->buf,2000);
+}
+
+void WebSocket_read(WebSocket* ws,Outbuf* msg){
+    for(;;) {
+        while(Inbuf_remain(&ws->ibuf)<2){
+            WebSocket_read_socket(ws);
+        }
+        uint8_t flags = Inbuf_at(&ws->ibuf,0);
+        if(flags&0x80!=0){
+            error("not-FIN frame is not supported");
+        }
+        uint8_t blen=Inbuf_at(&ws->ibuf,1);
+        uint64_t len = blen&0x7f;
+        uint8_t masked=(blen&0x80)!=0;
+        if(masked){
+            error("unexpected masked frame");
+        }
+        Inbuf_progress(&ws->ibuf,2);
+        if(len==126){
+            while(Inbuf_remain(&ws->ibuf)<2){
+                WebSocket_read_socket(ws);
+            }
+            len = Inbuf_at(&ws->ibuf,0)<<8 |Inbuf_at(&ws->ibuf,1);
+            Inbuf_progress(&ws->ibuf,2);
+        }
+        else if(len==127){
+            while(Inbuf_remain(&ws->ibuf)<8){
+                WebSocket_read_socket(ws);
+            }
+            len=0;
+            for(size_t i=0;i<8;i++){
+                len |=  ((uint64_t)Inbuf_at(&ws->ibuf,i)) << (8*(7-i));
+            }
+            Inbuf_progress(&ws->ibuf,8);
+        }
+        while(Inbuf_remain(&ws->ibuf)<len){
+            WebSocket_read_socket(ws);
+        }
+        B brk=0;
+        if(flags&0x0f==1) {
+            Outbuf_append(msg,Inbuf_at_ptr(&ws->ibuf,0),len);
+            brk=1;
+        }
+        else if(flags&0x0f== 9){
+            Outbuf tmp;
+            Outbuf_init(&tmp);
+            Outbuf_put_uint8(&tmp,flags);
+            Outbuf_put_uint8(&tmp,blen|0x80);
+            if(blen==126){
+                Outbuf_put_uint16(&tmp,(uint16_t)len);
+            }
+            else if(blen==127){
+                Outbuf_put_uint64(&tmp,len);
+            }
+            uint32_t mask_key= 0x12345678;
+            Outbuf_put_uint32(&tmp,mask_key);
+            send(ws->fd,tmp.data,tmp.len,0);
+            Outbuf_clean(&tmp);
+        }
+        else if(flags&0x0f==8){
+            error("connection close");
+        }
+        Inbuf_progress(&ws->ibuf,len);
+    }
 }
 
 int main() {
@@ -617,6 +690,12 @@ int main() {
     HeaderFields_init(&hf);
     Inbuf cmp = Inbuf_new(buf.data,buf.len);
     read_http_response(fd,&hf,&cmp);
+    WebSocket ws;
+    WebSocket_init(&ws,fd);
 
+    for(;;) {
+        Outbuf_clean(&buf);
+        WebSocket_read(&ws,&buf);
+    }
     closesocket(fd);
 }
