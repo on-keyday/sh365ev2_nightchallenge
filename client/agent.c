@@ -215,10 +215,9 @@ B Inbuf_expect(Inbuf*b,const char* s){
 
 
 void read_3byte(Inbuf* b,uint32_t* buf,uint32_t* read){
-    int l=b->len<3?b->len:3;
+    int l=Inbuf_remain(b) <3?Inbuf_remain(b):3;
     for(int i=0;i<l;i++){
-        *buf <<= 8;
-        *buf|= Inbuf_at(b,i);
+        *buf|= Inbuf_at(b,i) << (8*(3-i-1));
     }
     Inbuf_progress(b,l);
     *read=l;
@@ -227,7 +226,7 @@ void read_3byte(Inbuf* b,uint32_t* buf,uint32_t* read){
 B base64_encode(Inbuf* in, Outbuf* out,uint8_t c62, uint8_t c63 ,B no_padding) {
     size_t count=0;
     while (!Inbuf_eof(in)) {
-        uint32_t num,red;
+        uint32_t num=0,red=0;
         read_3byte(in,&num,&red);
         if (!red) {
             break;
@@ -244,6 +243,7 @@ B base64_encode(Inbuf* in, Outbuf* out,uint8_t c62, uint8_t c63 ,B no_padding) {
     }
     while (!no_padding && count % 4) {
         Outbuf_put_uint8(out,'=');
+        count++;
     }
     return 1;
 }
@@ -424,12 +424,17 @@ void HeaderFields_add(HeaderFields* f,const Slice* key,const Slice* value) {
 }
 
 typedef struct {
-    uint16_t status;
     HeaderFields fields;
 }Response;
 
 int expect_eol(Inbuf* buf){
     return Inbuf_expect(buf,"\r\n")?2:0;
+}
+
+void parse_status_line(Inbuf* buf) {
+    if(!Inbuf_expect(buf,"HTTP/1.1 101 Switching Protocols\r\n")){
+        error("not 101");
+    }
 }
 
 int parse_http_fields(Inbuf* buf,HeaderFields* f) {
@@ -484,8 +489,31 @@ int parse_http_fields(Inbuf* buf,HeaderFields* f) {
     }
 }
 
-int read_http_response(Inbuf* buf,Response* resp){
-    
+void read_http_response(SOCKET fd,HeaderFields* f){
+    uint8_t buf[2000];
+    int res = recv(fd,(char*)buf,2000,0);
+    if(res<=0){
+        error("EOF");
+    }
+    Inbuf ibuf = Inbuf_new(buf,res);
+    parse_status_line(&ibuf);
+    for(;;) {
+        int val=parse_http_fields(&ibuf,f);
+        if(val<0){
+            error("parse header");
+        }
+        if(val==1){
+            break;
+        }
+        memmove(buf,buf+ibuf.offset,ibuf.len - ibuf.offset);
+        ibuf.len-=ibuf.offset;
+        ibuf.offset=0;
+        res= recv(fd,(char*)buf+ibuf.len,2000-ibuf.len,0);
+        if(res<=0){
+            error("EOF");
+        }
+        ibuf.len+=res;
+    }
 }
 
 void gen_seckey(Outbuf* hdr,Outbuf* hash) {
@@ -520,9 +548,11 @@ void write_websocket_handshake_request(SOCKET fd,Outbuf* hash){
     Outbuf_append_str(&buf,"GET /senda HTTP/1.1\r\n");
     Outbuf_append_str(&buf,"Host: localhost:8090\r\n");
     Outbuf_append_str(&buf,"Origin: http://localhost:8090\r\n");
-    Outbuf_append_str(&buf,"Connection: Upgrade");
+    Outbuf_append_str(&buf,"Connection: Upgrade\r\n");
+    Outbuf_append_str(&buf,"Upgrade: websocket\r\n");
     Outbuf_append_str(&buf,"Sec-Websocket-Version: 13\r\n");
     gen_seckey(&buf,hash);
+    Outbuf_append_str(&buf,"\r\n");
     send(fd,(const char*)buf.data,buf.len,0);
     Outbuf_clean(&buf);
 }
@@ -552,7 +582,8 @@ int main() {
     Outbuf buf;
     Outbuf_init(&buf);
     write_websocket_handshake_request(fd,&buf);
-
+    HeaderFields hf;
+    read_http_response(fd,&hf);
 
     closesocket(fd);
 }
