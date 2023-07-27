@@ -62,6 +62,7 @@ func (h *Hub) enqueAgent(a *Agent) {
 func handleAgent(a *Agent) {
 	<-a.start
 	<-a.close
+	a.c.Close()
 }
 
 func nearIndex(i, mod int) (int, int) {
@@ -181,9 +182,9 @@ func main() {
 	h := &Hub{queue: make(chan *Agent), agentPerGame: 5, phaseLimit: 10000}
 	go gameSpawner(h)
 	http.Handle("/", http.FileServer(http.Dir(".")))
-	http.Handle("/senda", websocket.Handler(func(c *websocket.Conn) {
+	http.Handle("/senda", &websocket.Server{Handler: func(c *websocket.Conn) {
 		agent := &Agent{c: c, start: make(chan struct{}, 1)}
 		h.enqueAgent(agent)
-	}))
+	}})
 	http.ListenAndServe(":8090", nil)
 }

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
-use websocket as ws;
-use ws::url::Url;
+use tokio_tungstenite as ws;
+use tokio;
+use tungstenite::Message;
+use futures_util::{SinkExt, StreamExt};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Candidate {
@@ -26,19 +28,14 @@ struct Select {
     pub say: String,
 }
 
-fn main() {
-    let url = Url::parse("ws://localhost:8090/senda").unwrap();
-    let builder = ws::ClientBuilder::from_url(&url);
-    let mut conn = builder
-        .origin(String::from("ws://localhost:8090"))
-        .connect_insecure()
-        .unwrap();
-    loop {
-        if let Ok(msg) = conn.recv_message() {
-            if msg.is_data() {
-                let msg: ws::Message = msg.into();
-                let s = serde_json::from_slice::<Candidate>(&msg.payload).unwrap();
-                let y = match s.state {
+#[tokio::main]
+async fn main() {
+    let (mut s ,_) = ws::connect_async("ws://localhost:8090/senda").await.unwrap();
+    while let Some(msg) =  s.next().await {
+        match msg {
+            Ok(Message::Text(msg)) => {
+                let c = serde_json::from_slice::<Candidate>(msg.as_bytes()).unwrap();
+                let y = match c.state {
                     2 => {
                         println!("365");
                         let ack = Ack {
@@ -48,8 +45,8 @@ fn main() {
                     }
                     0 | 1 => {
                         let sel = Select {
-                            index: (s.you + 1) % s.member,
-                            say: match s.state {
+                            index: (c.you + 1) % c.member,
+                            say: match c.state {
                                 0 => {
                                     println!("Sec");
                                     String::from("Sec")
@@ -66,11 +63,10 @@ fn main() {
                     _ => unreachable!(),
                 }
                 .unwrap();
-                let msg = ws::Message::text(y);
-                conn.send_message(&msg).unwrap();
+                s.send(Message::Text(y)).await.unwrap();
             }
-        } else {
-            break;
+            Ok(Message::Close(_)) => {break;}
+            msg=> {panic!("not supported {:?}",msg)}
         }
     }
 }
